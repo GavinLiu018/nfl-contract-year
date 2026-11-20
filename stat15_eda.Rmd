@@ -1,0 +1,346 @@
+---
+title: "stats15_eda"
+author: "Gavin Liu"
+date: "2025-05-30"
+output: pdf_document
+---
+```{r}
+library(nflfastR)
+library(nflreadr)
+library(dplyr)
+library(ggplot2)
+```
+
+```{r}
+# make the contract first
+nflcontracts <- load_contracts (file_type = getOption ("nflreadr.prefer", default = "rds")) 
+
+# change variables in contracts dataset to clearly mark the start and end of a player's contract
+nflcontracts <- nflcontracts %>% mutate(season_start = year_signed, season_end= (year_signed + years - 1))
+
+# filter for years 2015 to 2023 for contracts
+contracts_filtered <- nflcontracts %>% filter(season_start >= 2015, season_end <= 2023)
+
+# load the player stats data from nflreadr in case we want to do all positions
+playerstats <- load_player_stats (
+  seasons = 2015:2023,
+  stat_type = c("offense", "defense", "kicking"),
+  file_type = getOption ("nflreadr.prefer", default = "rds")
+) 
+
+# filter and use the only offense dataset for now
+offense_stats <- playerstats %>% filter(position %in% c("QB", "RB", "WR", "TE", "FB", "HB"))
+
+# just a lil playing around to understand the two datasets
+dim(contracts_filtered)
+names(contracts_filtered)
+
+dim(offense_stats)
+names(offense_stats)
+
+# from this line below I found that the stats dataset's season variable is just the year
+sort(unique(offense_stats$season))
+sort(unique(offense_stats$week))
+
+# there is a chance gsis_id and player_id match
+
+# Check overlap of IDs
+contract_ids <- unique(contracts_filtered$gsis_id)
+stats_ids <- unique(offense_stats$player_id)
+
+length(intersect(contract_ids, stats_ids))           # overlap count
+length(setdiff(contract_ids, stats_ids))             # only in contracts
+length(setdiff(stats_ids, contract_ids))             # only in stats
+
+# there are 1342 values of IDs that overlap, with around 5700 values that don't overlap. I'm going to make sure now that the ids actually refer to the same people
+
+common_ids <- intersect(contracts_filtered$gsis_id, offense_stats$player_id)
+
+# From contracts
+contracts_check <- contracts_filtered %>%
+  filter(gsis_id %in% common_ids) %>%
+  select(gsis_id, contract_name = player) %>%
+  distinct()
+
+# From stats
+stats_check <- offense_stats %>%
+  filter(player_id %in% common_ids) %>%
+  select(player_id, stats_name = player_display_name) %>%
+  distinct()
+
+# Combine for comparison
+name_check <- inner_join(contracts_check, stats_check, by = c("gsis_id" = "player_id"))
+
+# View sample
+head(name_check, 40)
+
+# this seems to track since the names are the exact same
+```
+
+```{r}
+# I'm going to check now for name mismatches in combining the entirety of both datasets and use distinct() temporarily to not show any duplications
+
+# Keep only one row per player in each dataset
+contracts_names <- contracts_filtered %>%
+  select(gsis_id, contract_name = player) %>%
+  distinct(gsis_id, .keep_all = TRUE)
+
+stats_names <- offense_stats %>%
+  select(player_id, stats_name = player_display_name) %>%
+  distinct(player_id, .keep_all = TRUE)
+
+# Now join and check for name mismatches
+name_check_all <- inner_join(
+  contracts_names,
+  stats_names,
+  by = c("gsis_id" = "player_id")
+)
+
+# Check mismatches
+name_mismatches <- name_check_all %>%
+  filter(contract_name != stats_name)
+
+nrow(name_mismatches)
+name_mismatches
+
+# this above shows that they are actually all the same person, but their names are spelled differently. This means that I can completely merge based on gsis_id = player_id. There's no need to clean names or join on them, since they don't represent any actual mismatches.
+
+```
+```{r}
+#combine the data sets
+# I realized we can't use an inner join because they aren't temporally aligned,
+# so I'm using a filter (but not sure if it works properly)
+# basically, I want to make sure that if a player has a contract that starts in 2022, the player doesn't take info from his 2019 season when he was under another contract
+
+df_combined <- inner_join(
+  contracts_filtered,
+  offense_stats,
+  by = c("gsis_id" = "player_id"),
+  relationship = "many-to-many"
+) %>%
+  filter(season >= season_start, season <= season_end)
+
+# lastly, I'm gonna add a variable that flags whether a row of stats is about their contract year performance or not
+
+df_combined <- df_combined %>% mutate(contract_year = (season == season_end))
+
+dim(df_combined)
+head(df_combined)
+
+# shows that there are 1250 unique players within this dataset
+length(unique(df_combined$player))
+
+```
+
+```{r}
+# I think next steps would be:
+## double checking and going through the combined dataset that it all makes sense    the way that I combined it
+## cleaning the combined dataset further by picking the variables that we need
+    ## looking at head(df_combined), there's a ton of cols that we don't need,           such as the urls, college, height, weight, years, etc
+
+# we decided that our final dataset did not need any of the following columns listed in the select function below
+  ## these columns are either not useful in analysis of player performance or redundant variables
+
+df_combined_clean <- df_combined %>% select(
+    -target_share,
+    -date_of_birth,
+    -player_page,
+    -height,
+    -weight,
+    -college,
+    -cols,
+    -headshot_url,
+    -player_display_name,
+    -opponent_team,
+    -draft_year,
+    -draft_round,
+    -draft_overall,
+    -draft_team,
+    -is_active,
+    -value,
+    -otc_id,
+    -season_start,
+    -season_end,
+    -player_name,
+    -player_display_name,
+    -position.y,
+    -season_type,
+    -fantasy_points,
+    -fantasy_points_ppr,
+    -recent_team
+  )
+
+# I also want to rename some variables of the cleaned dataset as to make understanding easier
+
+df_combined_clean <- df_combined_clean %>% rename(position = position.x)
+df_combined_clean <- df_combined_clean %>% rename(contract_length = years)
+df_combined_clean <- df_combined_clean %>% rename(player_id = gsis_id)
+
+
+# I noticed that these are similar, but position_group is more high level, while position is more granular
+unique(df_combined_clean$position_group)
+unique(df_combined_clean$position)
+
+str(df_combined_clean)
+dim(df_combined_clean)
+
+# This shows that the data set is actually almost split half half between contract and non contract years
+sum(df_combined_clean$contract_year==TRUE)
+sum(df_combined_clean$contract_year==FALSE)
+```
+
+```{r}
+# I want to make a couple more variables that will help us better analyze player performances 
+
+# first, we are adding a total_epa variable that represents the epa within all categories (passing, receiving, and rushing)
+  # each game has a different epa for the player, and depending on position the player might have NA values in epas within sections that don't apply to them. 
+  # therefore, we must remove all na values when calculating this value
+df_combined_clean <- df_combined_clean %>% mutate(total_epa = rowSums(select(., ends_with("_epa")), na.rm = TRUE))
+
+# we are adding a completion % variable, which is helpful for performance analysis on QBs. Completion % = (completions/attempts)
+df_combined_clean <- df_combined_clean %>% mutate(completion_percent = ifelse(!is.na(attempts) & attempts > 0, (completions/attempts)*100, NA))
+
+# we are also adding yards per carry, which is helpful for analysis of RB positions, as well as QB when they run the ball. yards_per_carry = rushing_yards / carries
+df_combined_clean <- df_combined_clean %>% mutate(yards_per_carry = ifelse(!is.na(carries) & carries > 0, rushing_yards/carries, NA))
+
+# last, we are adding catch rate, which is helpful for performance analysis of WR positions. catch_rate = receptions/targets
+df_combined_clean <- df_combined_clean %>% mutate(catch_rate = ifelse(!is.na(targets) & targets > 0, (receptions/targets)*100, NA))
+
+dim(df_combined_clean)
+head(df_combined_clean)
+
+```
+# Analyzing the value of running backs
+```{r}
+df_combined_clean %>%
+  filter(position == "RB") %>%
+  group_by(contract_year) %>%
+  summarize(avg_epa = mean(total_epa, na.rm = TRUE)) %>%
+  ggplot(aes(x = contract_year, y = avg_epa, fill = contract_year)) + geom_col() + labs(x = "Contract Year", y = "Average EPA per Game")
+```
+
+Suggests that for running backs, on average, players do equally as bad in
+their contract year compared to other years. Another point this brings up is
+that running backs, when measured by their epa, are a detriment to their
+team's performance. However, this is an exaggeration and maybe a
+misinterpretation of the data because if they were a detriment to team
+success, why would they be paid so much, if at all? Let's see how much
+running backs are paid when compared to other positions.
+
+```{r}
+df_combined_clean %>%
+  group_by(position) %>%
+  summarize(avg_apy = mean(apy)) %>%
+  ggplot(aes(x = position, y = avg_apy, fill = position)) + geom_col() + labs(x = "Position", y = "Average APY per Game")
+```
+
+This shows that RBs are the 4th highest paid position on average. If they
+have a negative average epa, then why are they paid so much? To answer this
+question, we need to understand what in a football game rewards players with
+higher epas. The epa stat is biased towards explosive plays over consistent,
+small yardage gains. So, by nature, running backs tend to get a smaller epa
+than other positions. If we want to visualize another variable that can show
+this position's effectiveness on the field, we can look at the yards per
+carry stat.
+
+```{r}
+df_combined_clean %>%
+  filter(position == "RB") %>%
+  group_by(contract_year) %>%
+  summarize(avg_yd_per_carry = mean(rushing_yards / carries, na.rm = TRUE)) %>%
+  ggplot(aes(x = contract_year, y = avg_yd_per_carry, fill = contract_year)) + geom_col() + labs(x = "Contract Year", y = "Average Yards per Carry")
+```
+
+This visualization shows that running backs, whether in their contract year
+or not, tend to have relatively consistent, positive yardage gains per
+carry. This has not only have the benefit of getting the ball closer to
+scoring points, but also wears out the opposing team's defense. Being able
+to consistently come out of a play with positive gains adds value to the
+position that epa might not capable of showing.
+
+# Analyzing the performance of wide receivers in their contract year
+```{r}
+df_combined_clean %>%
+  filter(position == "WR") %>%
+  group_by(contract_year) %>%
+  summarize(avg_rec_yds = mean(receiving_yards)) %>%
+  ggplot(aes(x = contract_year, y = avg_rec_yds, fill = contract_year)) + geom_col() + labs(x = "Contract Year", y = "Average Receiving Yards per Game")
+```
+
+Suggests that wide receivers, on average, score fewer receiving yards per game during their contract year.
+
+```{r}
+df_combined_clean %>%
+  filter(position == "WR") %>%
+  group_by(contract_year) %>%
+  summarize(avg_receptions = mean(receptions)) %>%
+  ggplot(aes(x = contract_year, y = avg_receptions, fill = contract_year)) + geom_col() + labs(x = "Contract Year", y = "Average Receptions per Game")
+```
+
+Suggests that wide receivers, on average, have fewer receptions during their
+contract year. Let's narrow this down to just a few high yardage wide
+receivers.
+
+```{r}
+df_combined_clean %>%
+  group_by(player) %>%
+  filter(mean(receiving_yards, na.rm = TRUE) >= 65) %>%
+  group_by(contract_year) %>%
+  summarize(avg_receptions = mean(receptions)) %>%
+  ggplot(aes(x = contract_year, y = avg_receptions, fill = contract_year)) + geom_col() + labs(x = "Contract Year", y = "Average Receptions per Game")
+```
+
+Now this closes the gap by a considerable margin. I chose to filter by
+players who average 65 or more yards per game because this would set them at
+65 yards/game * 17 games/season = 1105 yards per season, which is
+considerably good for wide receivers. The increase in average receptions
+during these star players' contract years leads us to believe that for star
+wide receivers, the quarterback is about equally as likely to pass the ball
+to them regardless of whether they are in their contract year or not. This
+also brings up that the lower average receptions in wide receivers' contract
+years is washed out by average or below average wide receivers. 
+
+# Salary based on previous contract year epa
+```{r}
+epa_contract_year <- df_combined_clean %>%
+  mutate(contract_year_year = year_signed + contract_length - 1) %>%
+  filter(season == contract_year_year) %>%
+  group_by(player, contract_year_year) %>%
+  summarize(contract_year_epa = mean(total_epa, na.rm = TRUE), .groups = "drop")
+next_contract <- df_combined_clean %>%
+  select(player, year_signed, guaranteed, position) %>%
+  rename(year_signed_next = year_signed, guaranteed_next = guaranteed)
+df_combined_sal <- epa_contract_year %>%
+  left_join(next_contract, by = c("player" = "player", "contract_year_year" = "year_signed_next"))
+QB_model <- lm(guaranteed_next ~ contract_year_epa, data = df_combined_sal %>% filter(position == "QB"))
+QB_slope <- coef(QB_model)[["contract_year_epa"]]
+RB_model <- lm(guaranteed_next ~ contract_year_epa, data = df_combined_sal %>% filter(position == "RB"))
+RB_slope <- coef(RB_model)[["contract_year_epa"]]
+WR_model <- lm(guaranteed_next ~ contract_year_epa, data = df_combined_sal %>% filter(position == "WR"))
+WR_slope <- coef(WR_model)[["contract_year_epa"]]
+# QBs
+df_combined_sal %>%
+  filter(!is.na(guaranteed_next), position == "QB") %>%
+  ggplot(aes(x = contract_year_epa, y = guaranteed_next)) +
+  geom_point(alpha = 0.6) +
+  geom_smooth(method = "lm", se = FALSE, color = "blue") + 
+  annotate("text", x = Inf, y = -Inf, hjust = 1.1, vjust = -1, label = paste0("Slope: ", round(QB_slope, 2)), size = 4, color = "black") +
+  labs(x = "Contract Year EPA", y = "Guaranteed Money in Next Contract")
+# RBs
+df_combined_sal %>%
+  filter(!is.na(guaranteed_next), position == "RB") %>%
+  ggplot(aes(x = contract_year_epa, y = guaranteed_next)) +
+  geom_point(alpha = 0.6) +
+  geom_smooth(method = "lm", se = FALSE, color = "blue") +
+  annotate("text", x = Inf, y = -Inf, hjust = 1.1, vjust = -1, label = paste0("Slope: ", round(RB_slope, 2)), size = 4, color = "black") +
+  labs(x = "Contract Year EPA", y = "Guaranteed Money in Next Contract")
+# WRs
+df_combined_sal %>%
+  filter(!is.na(guaranteed_next), position == "WR") %>%
+  ggplot(aes(x = contract_year_epa, y = guaranteed_next)) +
+  geom_point(alpha = 0.6) +
+  geom_smooth(method = "lm", se = FALSE, color = "blue") +
+  annotate("text", x = Inf, y = -Inf, hjust = 1.1, vjust = -1, label = paste0("Slope: ", round(WR_slope, 2)), size = 4, color = "black") +
+  labs(x = "Contract Year EPA", y = "Guaranteed Money in Next Contract")
+```
+
